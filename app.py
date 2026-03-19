@@ -4,80 +4,81 @@ from scipy import signal
 import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="高压仿真对比", layout="wide")
-st.title("⚡ 高压分压器：实测对比仿真工具")
+st.set_page_config(page_title="1200kV分压器专业仿真", layout="wide")
+st.title("⚡ 高压冲击测量系统：全要素专业仿真")
 
-# --- 2. 侧边栏：参数调节 ---
-st.sidebar.header("🚀 1. 方波源设置")
-source_mode = st.sidebar.toggle("使用理想方波源", value=True)
-if not source_mode:
-    r_source = st.sidebar.slider("源内阻 (Ω)", 0, 100, 50)
-    tr_source_ns = st.sidebar.slider("源原生上升时间 (ns)", 0, 200, 50)
-else:
-    r_source = 0
-    tr_source_ns = 0
+# --- 2. 侧边栏：分压器结构 ---
+st.sidebar.header("📏 1. 分压器主体 (R1/R2)")
+r_high = st.sidebar.number_input("高压臂电阻 R1 (Ω)", value=10000.0)
+r_low = st.sidebar.number_input("低压臂电阻 R2 (Ω)", value=10.0)
+h = st.sidebar.slider("分压器高度 H (m)", 0.5, 12.0, 6.5)
+d_ring = st.sidebar.slider("均压环直径 D (m)", 0.1, 2.5, 1.2)
 
-st.sidebar.divider()
-st.sidebar.header("📏 2. 结构与引线 (1200kV 典型值)")
-h = st.sidebar.slider("高度 H (m)", 0.5, 15.0, 6.5)
-d = st.sidebar.slider("均压环直径 D (m)", 0.1, 3.0, 1.2)
+st.sidebar.header("🔌 2. 测量电缆与匹配")
+cable_len = st.sidebar.slider("测量电缆长度 (m)", 1, 100, 20)
+z0 = st.sidebar.selectbox("电缆特性阻抗 Z0 (Ω)", [50, 75], index=0)
+rs = st.sidebar.slider("首端匹配电阻 Rs (Ω)", 0, 100, 50, help="应等于Z0以消除反射")
+rt_scope = st.sidebar.selectbox("末端匹配/示波器阻抗 (Ω)", [1e6, 50], index=1)
+
+st.sidebar.header("➰ 3. 寄生参数与补偿")
 l_lead = st.sidebar.slider("引线电感 L (μH)", 0.1, 20.0, 5.0)
-
-st.sidebar.header("🔌 3. 电路参数")
-rd_int = st.sidebar.slider("内部阻尼 Rd (Ω)", 0, 1000, 150)
-rs = st.sidebar.slider("首端匹配 Rs (Ω)", 0, 100, 50)
+r_damp = st.sidebar.slider("高压线串联阻尼 (Ω)", 0, 500, 100)
+cp_end = st.sidebar.slider("末端补偿电容 Cp (pF)", 0, 1000, 0)
 
 # --- 3. 核心计算逻辑 ---
-def calculate_response():
-    # 物理常数与 Cg 计算
+def run_pro_sim():
+    # 物理常数计算 Cg
     eps0 = 8.854e-12
-    cg_pf = (2 * np.pi * eps0 * h) / (np.log(4 * h / d) - 1) * 1e12 * 1.15
+    cg_pf = (2 * np.pi * eps0 * h) / (np.log(4 * h / d_ring) - 1) * 1e12 * 1.15
     
+    # 模拟传输线延时 (假设波速 0.7c)
+    tau = cable_len / (3e8 * 0.7)
+    
+    # 集中参数简化模型
     L = l_lead * 1e-6
-    C = cg_pf * 1e-12
-    # 总阻尼包含源内阻
-    R_total = rd_int + rs + r_source
+    C = (cg_pf + cp_end) * 1e-12
+    # 总阻尼
+    r_total = r_damp + rs + (z0 if rt_scope == 50 else 0)
     
-    # 建立二阶系统
-    sys = signal.TransferFunction([1], [L * C, R_total * C, 1])
+    sys = signal.TransferFunction([1], [L*C, r_total*C, 1])
     t = np.linspace(0, 4e-6, 4000)
     t, y = signal.step(sys, T=t)
     
-    return t, y, cg_pf
-
-t, y, cg_calc = calculate_response()
-
-# --- 4. 稳健的指标计算 (修复 NameError) ---
-tr_final = "N/A"
-os_pct = 0.0
-
-try:
-    # 寻找 10% 和 90% 的点
-    idx10 = np.where(y >= 0.1)[0]
-    idx90 = np.where(y >= 0.9)[0]
+    # 模拟反射叠加 (如果首末端不匹配)
+    gamma_s = (rs - z0) / (rs + z0)
+    gamma_r = (rt_scope - z0) / (rt_scope + z0)
     
-    if len(idx10) > 0 and len(idx90) > 0:
-        # 计算分压器自身上升时间
-        tr_divider_ns = (t[idx90[0]] - t[idx10[0]]) * 1e9
-        # 如果非理想源，使用平方和根公式合成
-        tr_final_val = np.sqrt(tr_divider_ns**2 + tr_source_ns**2)
-        tr_final = f"{tr_final_val:.1f} ns"
+    # 在 2*tau 时间点引入反射扰动
+    reflection_idx = np.where(t > 2*tau)[0]
+    if len(reflection_idx) > 0 and abs(gamma_s * gamma_r) > 0.01:
+        y[reflection_idx] += y[reflection_idx] * gamma_s * gamma_r * 0.2
+        
+    # 计算实际分压比 (考虑示波器并联)
+    r2_eff = (r_low * rt_scope) / (r_low + rt_scope)
+    ratio = (r_high + r2_eff) / r2_eff
     
-    if np.max(y) > 1.0:
-        os_pct = (np.max(y) - 1.0) * 100
-except Exception as e:
-    st.error(f"计算过程异常: {e}")
+    return t, y, cg_pf, ratio
 
-# --- 5. UI 展示 ---
+t_p, y_p, cg_calc, final_ratio = run_pro_sim()
+
+# --- 4. 结果展示 ---
 c1, c2, c3 = st.columns(3)
-c1.metric("合成上升时间 (Tr)", tr_final)
-c2.metric("超调量 (Overshoot)", f"{os_pct:.1f} %")
-c3.metric("估算对地电容 (Cg)", f"{cg_calc:.1f} pF")
+# 指标计算
+try:
+    idx10 = np.where(y_p >= 0.1)[0][0]
+    idx90 = np.where(y_p >= 0.9)[0][0]
+    tr = (t_p[idx90] - t_p[idx10]) * 1e9
+    c1.metric("上升时间 (Tr)", f"{tr:.1f} ns")
+except:
+    c1.metric("上升时间 (Tr)", "检测中")
 
+c2.metric("实际分压比", f"{final_ratio:.1f} : 1")
+c3.metric("对地电容 (Cg)", f"{cg_calc:.1f} pF")
+
+# 绘图
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=t*1e6, y=y, name='仿真波形', line=dict(color='#00CC96', width=3)))
-fig.add_hline(y=1.0, line_dash="dash", line_color="red", opacity=0.5)
+fig.add_trace(go.Scatter(x=t_p*1e6, y=y_p, name='示波器输出波形', line=dict(color='#FF4B4B', width=3)))
 fig.update_layout(xaxis_title="时间 (μs)", yaxis_title="归一化电压", template="plotly_white")
 st.plotly_chart(fig, use_container_width=True)
 
-st.info(f"💡 提示：当前{'已考虑' if not source_mode else '未考虑'}方波源影响。实际对比 1200kV 设备时，建议开启非理想源模式并设置源内阻为 50Ω。")
+st.info(f"💡 调试建议：调节'电缆长度'。如果 Rs 不等于 {z0}Ω，你会看到波形在 {cable_len/105:.1f}μs 处出现反射阶梯。")
