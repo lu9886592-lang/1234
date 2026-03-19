@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="1200kV精密全要素仿真", layout="wide")
 st.title("⚡ 高压冲击测量系统：全要素自动建模仿真")
 
-# --- 2. 侧边栏：电压等级与源设置 ---
+# --- 2. 侧边栏：参数输入 ---
 st.sidebar.header("🚀 1. 电压等级与方波源")
 kv_level = st.sidebar.selectbox("选择分压器电压等级 (kV)", [200, 400, 800, 1200, 2400], index=3)
 
@@ -28,8 +28,9 @@ else: h_init, d_init, r1_init = 12.00, 2.20, 20000.00
 st.sidebar.divider()
 st.sidebar.header("📏 2. 物理几何尺寸")
 h_total = st.sidebar.number_input("分压器总高度 H (m)", value=h_init, step=0.01, format="%.2f")
-d_ring = st.sidebar.number_input("均压环/主体直径 D (m)", value=d_init, step=0.01, format="%.2f")
+d_ring = st.sidebar.number_input("均压环直径 D (m)", value=d_init, step=0.01, format="%.2f")
 l_wire = st.sidebar.number_input("高压引线长度 Lw (m)", value=5.00, step=0.01, format="%.2f")
+dw_wire = st.sidebar.number_input("高压引线直径 dw (mm)", value=30.00, step=0.01, format="%.2f", help="引线越粗，电感越小")
 
 st.sidebar.header("🔌 3. 电路核心参数")
 r1 = st.sidebar.number_input("高压臂电阻 R1 (Ω)", value=r1_init, step=0.01, format="%.2f")
@@ -46,15 +47,16 @@ rt = st.sidebar.selectbox("示波器输入阻抗 (Ω)", [1000000.0, 50.0], index
 
 # --- 3. 核心物理计算逻辑 ---
 def run_ultimate_sim():
-    # A. 寄生电容 Cg 公式
     eps0 = 8.854187e-12
+    # 寄生电容：受高度 H 和 均压环直径 D 影响
     cg_pf = (2 * np.pi * eps0 * h_total) / (np.log(4 * h_total / d_ring) - 1) * 1e12 * 1.15
     
-    # B. 全回路电感 L 公式 (考虑长度 Lw+H 和 宽度 d_ring)
-    mu0 = 4 * np.pi * 1e-7
+    # 全回路电感：受引线长度 Lw、高度 H 和 引线直径 dw 影响
+    # dw 单位换算为 m
+    dw_m = dw_wire / 1000.0
     path = l_wire + h_total
-    eff_r = d_ring / 2
-    l_loop_uh = 0.2 * path * (np.log(2 * path / eff_r) - 0.75)
+    # 采用矩形回路精密自感公式
+    l_loop_uh = 0.2 * path * (np.log(2 * path / (dw_m / 2)) - 0.75)
     
     # 系统动态参数汇总
     L_sys = (l_loop_uh + lp_end) * 1e-6
@@ -66,7 +68,7 @@ def run_ultimate_sim():
     t = np.linspace(0, 5e-6, 5000)
     t, y = signal.step(sys, T=t)
     
-    # 测量变比 K 公式
+    # 测量变比 K
     r2_eff = (r2 * rt) / (r2 + rt)
     k_actual = (r1 + r2_eff) / r2_eff
     
@@ -74,7 +76,7 @@ def run_ultimate_sim():
 
 t_v, y_v, cg_res, l_res, k_res = run_ultimate_sim()
 
-# --- 4. 仪表盘与指标 ---
+# --- 4. 仪表盘指标 ---
 c1, c2, c3, c4, c5 = st.columns(5)
 try:
     idx10 = np.where(y_v >= 0.1)[0][0]
@@ -100,7 +102,11 @@ st.plotly_chart(fig, use_container_width=True)
 
 # --- 6. 公式说明区 ---
 with st.expander("📚 查看底层物理公式"):
+    st.write("### 1. 对地寄生电容 (Stray Capacitance)")
     st.latex(r"C_g = 1.15 \cdot \frac{2\pi\epsilon_0 H}{\ln(4H/D) - 1}")
-    st.latex(r"L_{loop} = 0.2 \cdot (L_w + H) \cdot \left( \ln\frac{2(L_w + H)}{D/2} - 0.75 \right)")
+    st.write("### 2. 回路等效电感 (Loop Inductance)")
+    st.latex(r"L_{loop} = 0.2 \cdot (L_w + H) \cdot \left( \ln\frac{2(L_w + H)}{d_w/2} - 0.75 \right)")
+    st.write("### 3. 合成上升时间 (Total Rise Time)")
     st.latex(r"T_{total} = \sqrt{T_{divider}^2 + T_{source}^2}")
+    st.write("### 4. 实际测量变比 (Actual Ratio)")
     st.latex(r"K = \frac{R_1 + (R_2 // R_{scope})}{R_2 // R_{scope}}")
