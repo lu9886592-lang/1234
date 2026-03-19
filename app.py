@@ -18,6 +18,7 @@ if not source_mode:
     r_src = st.sidebar.number_input("源内阻 (Ω)", value=50.00, step=0.01, format="%.2f")
     tr_src_ns = st.sidebar.number_input("源原生上升时间 (ns)", value=20.00, step=0.01, format="%.2f")
 
+# 初始预设
 if kv_level == 200: h_init, d_init, r1_init = 1.20, 0.40, 2000.00
 elif kv_level == 400: h_init, d_init, r1_init = 2.50, 0.60, 4000.00
 elif kv_level == 800: h_init, d_init, r1_init = 4.50, 0.90, 8000.00
@@ -27,7 +28,7 @@ else: h_init, d_init, r1_init = 12.00, 2.20, 20000.00
 st.sidebar.divider()
 st.sidebar.header("📏 2. 物理几何尺寸")
 h_total = st.sidebar.number_input("分压器总高度 H (m)", value=h_init, step=0.01, format="%.2f")
-d_ring = st.sidebar.number_input("均压环直径 D (m)", value=d_init, step=0.01, format="%.2f")
+d_ring = st.sidebar.number_input("均压环/主体直径 D (m)", value=d_init, step=0.01, format="%.2f")
 l_wire = st.sidebar.number_input("高压引线长度 Lw (m)", value=5.00, step=0.01, format="%.2f")
 
 st.sidebar.header("🔌 3. 电路核心参数")
@@ -45,14 +46,17 @@ rt = st.sidebar.selectbox("示波器输入阻抗 (Ω)", [1000000.0, 50.0], index
 
 # --- 3. 核心物理计算逻辑 ---
 def run_ultimate_sim():
+    # A. 寄生电容 Cg 公式
     eps0 = 8.854187e-12
     cg_pf = (2 * np.pi * eps0 * h_total) / (np.log(4 * h_total / d_ring) - 1) * 1e12 * 1.15
     
+    # B. 全回路电感 L 公式 (考虑长度 Lw+H 和 宽度 d_ring)
     mu0 = 4 * np.pi * 1e-7
     path = l_wire + h_total
-    l_loop_uh = 0.2 * path * (np.log(2 * path / (d_ring/2)) - 0.75)
+    eff_r = d_ring / 2
+    l_loop_uh = 0.2 * path * (np.log(2 * path / eff_r) - 0.75)
     
-    # 系统动态参数
+    # 系统动态参数汇总
     L_sys = (l_loop_uh + lp_end) * 1e-6
     C_sys = (cg_pf + cp_end) * 1e-12
     r_total_sys = r_src + r_damp_ext + rs + (z0_cable if rt == 50.0 else 0)
@@ -62,7 +66,7 @@ def run_ultimate_sim():
     t = np.linspace(0, 5e-6, 5000)
     t, y = signal.step(sys, T=t)
     
-    # 测量变比 K
+    # 测量变比 K 公式
     r2_eff = (r2 * rt) / (r2 + rt)
     k_actual = (r1 + r2_eff) / r2_eff
     
@@ -81,11 +85,10 @@ try:
 except:
     c1.metric("合成 Tr", "N/A")
 
-# 计算超调量 (Overshoot)
 os_val = (np.max(y_v) - 1.0) * 100 if np.max(y_v) > 1.0 else 0.0
 c2.metric("超调量 β", f"{os_val:.2f} %")
 c3.metric("计算 Cg", f"{cg_res:.2f} pF")
-c4.metric("全回路 L", f"{l_res:.2f} μH")
+c4.metric("回路 L", f"{l_res:.2f} μH")
 c5.metric("测量变比 K", f"{k_res:.2f}")
 
 # --- 5. 波形展示 ---
@@ -95,4 +98,9 @@ fig.add_hline(y=1.0, line_dash="dash", line_color="white", opacity=0.3)
 fig.update_layout(xaxis_title="时间 (μs)", yaxis_title="pu", template="plotly_dark", height=600)
 st.plotly_chart(fig, use_container_width=True)
 
-st.info(f"ℹ️ 测量链状态：测量线长度 {cable_l:.2f}m，阻抗 {z0_cable:.2f}Ω。当前{'已考虑' if not source_mode else '未考虑'}方波源影响。")
+# --- 6. 公式说明区 ---
+with st.expander("📚 查看底层物理公式"):
+    st.latex(r"C_g = 1.15 \cdot \frac{2\pi\epsilon_0 H}{\ln(4H/D) - 1}")
+    st.latex(r"L_{loop} = 0.2 \cdot (L_w + H) \cdot \left( \ln\frac{2(L_w + H)}{D/2} - 0.75 \right)")
+    st.latex(r"T_{total} = \sqrt{T_{divider}^2 + T_{source}^2}")
+    st.latex(r"K = \frac{R_1 + (R_2 // R_{scope})}{R_2 // R_{scope}}")
